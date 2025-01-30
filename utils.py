@@ -53,6 +53,6 @@ def get_player_stats(selected_country=None, selected_league=None):
         query += " WHERE " + " AND ".join(conditions)
 
     # Debugging: Log final query
-    st.code(f"Executing SQL:\n{query}")
+
 
     return run_query(query)
