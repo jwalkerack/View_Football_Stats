@@ -27,7 +27,7 @@ def run_query(query):
 def get_team_filters():
     query = """
     SELECT DISTINCT COUNTRY_NAME, SHORT_NAME AS LEAGUE_NAME, TEAM_NAME 
-    FROM DIM_TEAMS_V2
+    FROM DIM_TEAMS
     """
     return run_query(query)
 

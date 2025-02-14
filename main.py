@@ -3,7 +3,7 @@ from features.attendance import attendance_analysis
 from features.MatchResults import result_analysis
 from features.GoalsPredication import goals_prediction
 from features.players import players_analysis
-
+from features.leagueTables import leagues
 # Main app function
 def main():
     st.title("Football Analytics")
@@ -12,19 +12,21 @@ def main():
         """
     )
     # Sidebar for toggling between apps
-    app_options = ["Attendance Analysis", "Result Analysis", "Goals Prediction", "Player Analysis"]
+    app_options = ["League tables","Attendance analysis", "Team form analysis", "Goals prediction"]
     selected_app = st.sidebar.selectbox("Select an App", app_options)
 
-    if selected_app == "Attendance Analysis":
+    if selected_app == "League tables":
+        leagues()
+    elif  selected_app == "Attendance analysis":
         attendance_analysis()
 
-    elif selected_app == "Result Analysis":
+    elif selected_app == "Team form analysis":
         result_analysis()
 
-    elif selected_app == "Player Analysis":
-        st.header("Player Analysis")
-        players_analysis()
-    elif selected_app == "Goals Prediction":
+   # elif selected_app == "Player Analysis":
+     #   st.header("Player Analysis")
+     #   players_analysis()
+    elif selected_app == "Goals prediction":
         goals_prediction()
 
 

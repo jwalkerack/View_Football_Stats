@@ -1,171 +1,186 @@
 import streamlit as st
 import pandas as pd
-from utils import run_query
+from utils import run_query  # Ensure you have a run_query function that connects to Snowflake
 
-def fetch_team_match_data():
-    query = """
-    SELECT 
-        MATCH_ID,
-        HOME_TEAM_NAME AS TEAM_NAME,
-        HOME_TEAM_SCORE AS TEAM_SCORE,
-        AWAY_TEAM_NAME AS OPPONENT_TEAM,
-        AWAY_TEAM_SCORE AS OPPONENT_SCORE,
-        'Home' AS HOME_AWAY,
-        PLAYED_ON AS GAME_DATE,
-        LEAGUE_NAME
-    FROM TEAM_SUMMARY
-    WHERE WAS_GAME_POSTPONED = FALSE
 
-    UNION ALL
+# Function to fetch team results based on user input
 
-    SELECT 
-        MATCH_ID,
-        AWAY_TEAM_NAME AS TEAM_NAME,
-        AWAY_TEAM_SCORE AS TEAM_SCORE,
-        HOME_TEAM_NAME AS OPPONENT_TEAM,
-        HOME_TEAM_SCORE AS OPPONENT_SCORE,
-        'Away' AS HOME_AWAY,
-        PLAYED_ON AS GAME_DATE,
-        LEAGUE_NAME
-    FROM TEAM_SUMMARY
-    WHERE WAS_GAME_POSTPONED = FALSE
+def fetch_team_results(num_games, result_conditions):
+    """
+    Queries Snowflake to retrieve aggregated win/loss/draw counts
+    for each team over the last `num_games` matches.
+
+    Args:
+        num_games (int): The number of past games to analyze.
+        result_conditions (list): List of tuples containing conditions like [("Win", 5), ("Loss", 2)].
+
+    Returns:
+        pd.DataFrame: Aggregated results from Snowflake.
     """
 
-    return run_query(query)
-
-def apply_filters(data, result_conditions):
-    filtered_data = data.copy()
-
-    # Filter by result conditions
-    for result_type, count in result_conditions:
+    # Build WHERE clause dynamically based on user input
+    condition_clauses = []
+    for result_type, min_count in result_conditions:
         if result_type.lower() == "win":
-            filtered_data = filtered_data.groupby("TEAM_NAME").filter(
-                lambda x: sum(x["TEAM_SCORE"] > x["OPPONENT_SCORE"]) >= count
-            )
-        elif result_type.lower() == "draw":
-            filtered_data = filtered_data.groupby("TEAM_NAME").filter(
-                lambda x: sum(x["TEAM_SCORE"] == x["OPPONENT_SCORE"]) >= count
-            )
+            condition_clauses.append(f"AR.total_wins >= {min_count}")
         elif result_type.lower() == "loss":
-            filtered_data = filtered_data.groupby("TEAM_NAME").filter(
-                lambda x: sum(x["TEAM_SCORE"] < x["OPPONENT_SCORE"]) >= count
-            )
+            condition_clauses.append(f"AR.total_losses >= {min_count}")
+        elif result_type.lower() == "draw":
+            condition_clauses.append(f"AR.total_draws >= {min_count}")
 
-    return filtered_data
+    where_clause = " AND ".join(condition_clauses) if condition_clauses else "1=1"
 
-def get_form_data(last_n_games):
-    # Fetch match data dynamically from Snowflake
-    match_data = fetch_team_match_data()
+    # **Fixed SQL Query**
+    query = f"""
+WITH RankedGames AS (
+    SELECT 
+        TEAM_ID, 
+        GAME_NUMBER,
+        CASE 
+            WHEN GAMEROLE = 1 AND POINTS = 3 THEN 'win'
+            WHEN GAMEROLE = 1 AND POINTS = 0 THEN 'loss'
+            WHEN GAMEROLE = 1 AND POINTS = 1 THEN 'draw'
+            WHEN GAMEROLE = 2 AND POINTS = 3 THEN 'win'
+            WHEN GAMEROLE = 2 AND POINTS = 0 THEN 'loss'
+            WHEN GAMEROLE = 2 AND POINTS = 1 THEN 'draw'
+            ELSE 'unknown'
+        END AS match_result,
+        ROW_NUMBER() OVER (PARTITION BY TEAM_ID ORDER BY GAME_NUMBER DESC) AS game_rank
+    FROM FACT_TEAM_MATCH
+),
 
-    # Ensure only the last N games for each team are considered
-    match_data["GAME_DATE"] = pd.to_datetime(match_data["GAME_DATE"])
-    match_data = match_data.sort_values(by=["TEAM_NAME", "GAME_DATE"], ascending=[True, False])
-    match_data = match_data.groupby("TEAM_NAME").head(last_n_games).reset_index(drop=True)
+FilteredGames AS (
+    SELECT * FROM RankedGames WHERE game_rank <= {num_games}
+),
 
-    return match_data
+AggregatedResults AS (
+    SELECT
+        TEAM_ID,
+        COUNT(*) AS games,
+        SUM(CASE WHEN match_result = 'win' THEN 1 ELSE 0 END) AS total_wins,
+        SUM(CASE WHEN match_result = 'loss' THEN 1 ELSE 0 END) AS total_losses,
+        SUM(CASE WHEN match_result = 'draw' THEN 1 ELSE 0 END) AS total_draws
+    FROM FilteredGames
+    GROUP BY TEAM_ID
+)
+
+SELECT 
+    AR.TEAM_ID,
+    DM.TEAM_NAME,
+    DM.LEAGUE_NAME,
+    AR.games,
+    AR.total_wins,
+    AR.total_losses,
+    AR.total_draws
+FROM AggregatedResults AR
+LEFT JOIN DIM_TEAMS DM
+    ON AR.TEAM_ID = DM.TEAM_ID
+WHERE {where_clause} AND AR.games >= {num_games}  -- ✅ Ensures teams have at least `num_games`
+ORDER BY AR.total_wins DESC;
+
+    """
+
+    # Execute the query
+    df = run_query(query)
+
+    # ✅ Convert all column names to lowercase for consistency
+    df.columns = df.columns.str.lower()
+
+    # ✅ Debugging: Print the cleaned column names
+    print("DEBUG: Cleaned Column Names:", df.columns.tolist())
+
+    return df
+
+
+
+
+# Function to display results in a properly formatted table
+def display_results_table(df):
+    """Formats and displays results as a table in Streamlit."""
+    if df.empty:
+        st.warning("❌ No teams match the specified conditions.")
+        return
+
+    # ✅ Debugging: Print column names before accessing them
+    print("DEBUG: Displaying table with columns:", df.columns.tolist())
+
+    # Define required columns
+    required_columns = ['team_name', 'league_name', 'games', 'total_wins', 'total_losses',
+                        'total_draws']
+
+    # Check if required columns exist
+    missing_columns = [col for col in required_columns if col not in df.columns]
+
+    if missing_columns:
+        st.error(f"❌ Missing expected columns in the data: {missing_columns}")
+        return
+
+    # Convert dataframe to HTML with custom styling
+    table_html = df[required_columns].to_html(index=False, escape=False)
+
+    # Display the table using Streamlit write function
+    st.write(table_html, unsafe_allow_html=True)
+
+
+# Streamlit UI for result analysis
 def result_analysis():
-    st.subheader("Result Analysis")
-    st.markdown(
-        """How It Works. As a user, you will select the game interval to analyze. For example, if you choose **5 games**, the tool will focus on the last 5 games each team has played.  
-        You can then define conditions to filter teams based on performance. For instance, you might specify that a team must have **at least 3 wins** and **at least 1 draw** during the selected interval.  
-        Tip: Once Happy with Criteria Press **Show me Results** to return the games.
-        """
-    )
+    st.subheader("📊 Result Analysis")
+
+    st.markdown("""
+        **How It Works:**  
+        - Select how many past games to analyze per team.  
+        - Define **win/draw/loss** conditions to filter the results.  
+        - The system will later filter teams that meet these conditions.  
+    """)
+
+    # User input for number of games to analyze
     num_games = st.number_input(
-        "Select Amount of Games",
+        "🎮 Select Number of Past Games to Analyze",
         min_value=1,
         max_value=20,
         value=5,
-        help="Choose how many of each team's last games (home and away) you want to analyze."
+        help="Choose how many of each team's last games to include in the analysis."
     )
 
-    # Dynamic rows for result conditions
+    # Initialize session state for result conditions
     if "result_conditions" not in st.session_state:
         st.session_state.result_conditions = [{"type": "Win", "count": 1}]
 
-    # Add and remove buttons
+    # Buttons to add/remove conditions
     col1, col2 = st.columns([1, 1])
     with col1:
-        if st.button("Add Condition") and len(st.session_state.result_conditions) < 3:
+        if st.button("➕ Add Condition") and len(st.session_state.result_conditions) < 3:
             st.session_state.result_conditions.append({"type": "Win", "count": 1})
     with col2:
-        if st.button("Remove Condition") and len(st.session_state.result_conditions) > 1:
+        if st.button("🗑 Remove Condition") and len(st.session_state.result_conditions) > 1:
             st.session_state.result_conditions.pop()
 
-    # Display result condition rows
+    # Display dynamic result condition rows
     result_conditions = []
     for i, condition in enumerate(st.session_state.result_conditions):
         cols = st.columns([2, 1])
         with cols[0]:
             result_type = st.selectbox(
-                f"Result Type (Condition {i + 1})",
+                f"Condition {i + 1}: Result Type",
                 options=["Win", "Draw", "Loss"],
                 index=["Win", "Draw", "Loss"].index(condition["type"]),
                 key=f"result_type_{i}"
             )
         with cols[1]:
             result_count = st.number_input(
-                f"Count (Condition {i + 1})",
+                f"Condition {i + 1}: Minimum Count",
                 min_value=0,
                 value=condition["count"],
                 key=f"result_count_{i}"
             )
         result_conditions.append((result_type, result_count))
 
-    # Update session state with the latest conditions
-    st.session_state.result_conditions = [
-        {"type": result_type, "count": result_count} for result_type, result_count in result_conditions
-    ]
+    # Button to process results
+    if st.button("📈 Show Results"):
+        filtered_teams = fetch_team_results(num_games, result_conditions)
 
-    # Step 3: Analyze Data Based on Conditions
-    if st.button("Show me Results"):
-        # Fetch and filter data dynamically
-        form_data = get_form_data(last_n_games=num_games)
-        filtered_data = apply_filters(form_data, result_conditions)
-
-        # Display results
-        if not filtered_data.empty:
-            st.subheader("Match Results By Team")
-
-            # Transform data for desired output
-            filtered_data = filtered_data.sort_values(by=["TEAM_NAME", "GAME_DATE"])
-
-            # Extract relevant columns and modify as needed
-            table_data = pd.DataFrame({
-                "TeamName": filtered_data["TEAM_NAME"],
-                "PlayedOn": filtered_data["GAME_DATE"].dt.date,  # Convert datetime to date
-                "Home": filtered_data.apply(
-                    lambda x: x["TEAM_NAME"] if x["HOME_AWAY"] == "Home" else x["OPPONENT_TEAM"], axis=1
-                ),
-                "HomeScore": filtered_data.apply(
-                    lambda x: x["TEAM_SCORE"] if x["HOME_AWAY"] == "Home" else x["OPPONENT_SCORE"], axis=1
-                ),
-                "Away": filtered_data.apply(
-                    lambda x: x["TEAM_NAME"] if x["HOME_AWAY"] == "Away" else x["OPPONENT_TEAM"], axis=1
-                ),
-                "AwayScore": filtered_data.apply(
-                    lambda x: x["TEAM_SCORE"] if x["HOME_AWAY"] == "Away" else x["OPPONENT_SCORE"], axis=1
-                ),
-            })
-
-            # Reset the index to ensure it is not displayed in the output table
-            table_data = table_data.reset_index(drop=True)
-
-            # Add visibility for built-in features
-            st.write("""
-                **💡 Hoover Over table column to get additional features**:
-                """)
-
-            # Display the table
-            st.dataframe(table_data, use_container_width=True)
-
-            # Add a custom download button
-            csv = table_data.to_csv(index=False)
-            st.download_button(
-                label="📥 Download Table as CSV",
-                data=csv,
-                file_name="match_results.csv",
-                mime="text/csv",
-            )
+        if not filtered_teams.empty:
+            st.subheader("📊 Teams Matching Criteria")
+            display_results_table(filtered_teams)
         else:
-            st.warning("No teams match the specified criteria. Try adjusting your filters.")
+            st.warning("❌ No teams match the specified conditions.")

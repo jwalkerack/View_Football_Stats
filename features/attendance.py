@@ -1,45 +1,83 @@
-
 import streamlit as st
 import pandas as pd
 import plotly.express as px
-from utils import run_query, get_team_filters
+from utils import run_query
+import snowflake.connector
+import streamlit as st
+
+def get_snowflake_connection():
+    """
+    Establishes a connection to Snowflake using Streamlit secrets.
+    Returns an active Snowflake connection object.
+    """
+    try:
+        conn = snowflake.connector.connect(
+            user=st.secrets["snowflake"]["user"],
+            password=st.secrets["snowflake"]["password"],
+            account=st.secrets["snowflake"]["account"],
+            warehouse=st.secrets["snowflake"]["warehouse"],
+            database=st.secrets["snowflake"]["database"],
+            schema=st.secrets["snowflake"]["schema"]
+        )
+        return conn
+    except Exception as e:
+        st.error(f"❌ Snowflake connection failed: {e}")
+        return None
+
 
 def attendance_analysis():
     st.subheader("📊 Attendance Analysis")
 
-    # Fetch team filters from Snowflake
-    team_data = get_team_filters()
-    countries = team_data["COUNTRY_NAME"].unique()
+    # Step 1: Fetch leagues
+    leagues_query = "SELECT DISTINCT LEAGUE_NAME FROM DIM_LEAGUES ORDER BY LEAGUE_NAME;"
+    league_data = run_query(leagues_query)
 
-    # Country Selector
-    selected_country = st.selectbox("🌍 Select Country", options=["All"] + list(countries), index=0)
+    if league_data.empty:
+        st.warning("⚠ No leagues found.")
+        return
 
-    # Filter leagues based on selected country
-    leagues = team_data["LEAGUE_NAME"].unique() if selected_country == "All" else team_data[
-        team_data["COUNTRY_NAME"] == selected_country]["LEAGUE_NAME"].unique()
-    selected_league = st.selectbox("🏆 Select League", options=["All"] + list(leagues), index=0)
+    leagues = league_data["LEAGUE_NAME"].tolist()
 
-    # Filter teams based on selected country and league
-    available_teams = team_data["TEAM_NAME"].unique() if selected_league == "All" else team_data[
-        (team_data["COUNTRY_NAME"] == selected_country) & (team_data["LEAGUE_NAME"] == selected_league)]["TEAM_NAME"].unique()
+    # Step 2: User selects a league
+    selected_league = st.selectbox("🏆 Select League", options=["Select a League"] + leagues, index=0)
 
-    # Initialize session state for tracking teams
+    if selected_league == "Select a League":
+        st.warning("⚠ Please select a league to proceed.")
+        return
+
+    # Step 3: Fetch teams for the selected league
+    conn = get_snowflake_connection()
+    cursor = conn.cursor()
+
+    teams_query = "SELECT DISTINCT TEAM_NAME FROM DIM_TEAMS WHERE LEAGUE_NAME = %s ORDER BY TEAM_NAME;"
+    cursor.execute(teams_query, (selected_league,))
+    team_data = cursor.fetchall()
+    available_teams = [row[0] for row in team_data]  # Convert tuples to list
+
+    cursor.close()
+    conn.close()
+
+    if not available_teams:
+        st.warning("⚠ No teams found for this league.")
+        return
+
+    # Step 4: Initialize session state for team selection
     if "selected_teams" not in st.session_state:
         st.session_state.selected_teams = {}
 
-    # Team Selection
+    # Step 5: Team Selection
     new_team = st.selectbox(
         "🏟️ Select a Team to Add",
-        options=["Select"] + list(available_teams),
+        options=["Select a Team"] + available_teams,
         key="temp_team_selector"
     )
 
-    # Add Team Button
+    # Step 6: Add Team Button
     if st.button("➕ Add Team"):
-        if new_team != "Select" and new_team not in st.session_state.selected_teams:
-            st.session_state.selected_teams[new_team] = True  # Store team in session state
+        if new_team != "Select a Team" and new_team not in st.session_state.selected_teams:
+            st.session_state.selected_teams[new_team] = True
 
-    # Display Confirmed Teams with Remove Buttons
+    # Step 7: Display Confirmed Teams with Remove Buttons
     if st.session_state.selected_teams:
         st.markdown("### ✅ Confirmed Teams:")
         for team in list(st.session_state.selected_teams.keys()):
@@ -50,40 +88,32 @@ def attendance_analysis():
                 if st.button(f"🗑 Remove {team}", key=f"remove_{team}"):
                     del st.session_state.selected_teams[team]
 
-    # Confirm Team Button (Optional, acts as a safeguard)
+    # Step 8: Confirm Selection
     if st.button("✅ Confirm Selected Teams"):
         if not st.session_state.selected_teams:
-            st.warning("⚠️ Please add at least one team before confirming.")
+            st.warning("⚠ Please add at least one team before confirming.")
 
-    # Process Button
+    # Step 9: Process Attendance Data
     if st.button("📈 Process Attendance"):
         if not st.session_state.selected_teams:
-            st.warning("⚠️ Please confirm at least one team.")
+            st.warning("⚠ Please confirm at least one team.")
             return
 
-        # Convert selected team names to team IDs
-        team_ids_query = f"""
-        SELECT TEAM_ID, TEAM_NAME FROM DIM_TEAMS_V2
-        WHERE TEAM_NAME IN ({", ".join([f"'{team}'" for team in st.session_state.selected_teams.keys()])})
+        # Convert selected teams into SQL-safe format
+        team_names = tuple(st.session_state.selected_teams.keys())
+
+        # If only one team is selected, format tuple correctly
+        team_names_sql = f"('{team_names[0]}')" if len(team_names) == 1 else str(team_names)
+
+        # Attendance Query (Safe Parameterized Query)
+        attendance_query = f"""
+        SELECT PLAYED_ON, TEAM_NAME, ATTENDANCE
+        FROM ATTENDeNCE_VIEW
+        WHERE TEAM_NAME IN {team_names_sql}
+        ORDER BY PLAYED_ON ASC;
         """
-        team_id_mapping = run_query(team_ids_query)
 
-        if team_id_mapping.empty:
-            st.warning("❌ No matching team IDs found.")
-            return
-
-        # Convert team names to a list of IDs
-        team_ids = ", ".join([f"'{row['TEAM_ID']}'" for _, row in team_id_mapping.iterrows()])
-
-        # Updated Query: Join FAC_MATCH with DIM_TEAMS_V2 to get Team Names
-        query = f"""
-        SELECT fm.PLAYED_ON, dt.TEAM_NAME AS HOME_TEAM, fm.ATTENDANCE
-        FROM FAC_MATCH fm
-        JOIN DIM_TEAMS_V2 dt ON fm.HOME_TEAM_ID = dt.TEAM_ID
-        WHERE fm.HOME_TEAM_ID IN ({team_ids}) AND fm.WAS_GAME_POSTPONED = FALSE
-        ORDER BY fm.PLAYED_ON
-        """
-        attendance_data = run_query(query)
+        attendance_data = run_query(attendance_query)
 
         if attendance_data.empty:
             st.warning("❌ No attendance data found for the selected teams.")
@@ -92,13 +122,13 @@ def attendance_analysis():
         # Convert PLAYED_ON to datetime
         attendance_data["PLAYED_ON"] = pd.to_datetime(attendance_data["PLAYED_ON"])
 
-        # Plot attendance trends
+        # Step 10: Plot attendance trends
         fig = px.line(
             attendance_data,
             x="PLAYED_ON",
             y="ATTENDANCE",
-            color="HOME_TEAM",
+            color="TEAM_NAME",
             title="Attendance Over Time",
-            labels={"PLAYED_ON": "Date", "ATTENDANCE": "Attendance", "HOME_TEAM": "Team"}
+            labels={"PLAYED_ON": "Date", "ATTENDANCE": "Attendance", "TEAM_NAME": "Team"}
         )
         st.plotly_chart(fig, use_container_width=True)
