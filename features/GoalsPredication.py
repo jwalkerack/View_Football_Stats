@@ -184,12 +184,10 @@ def goals_prediction():
         predicted_away_goals_generic = round(away_team_data['Away Score'].mean(), 2)
 
         predicted_home_goals_weighted = round(
-            (0.6 * home_team_data['Home Score'].mean()) + (0.4 * away_team_data['Away Score'].mean()), 2
-        )
+            (0.7 * home_team_data['Home Score'].mean()) + (0.3 * away_team_data['Home Score'].mean()), 2)
 
         predicted_away_goals_weighted = round(
-            (0.6 * away_team_data['Away Score'].mean()) + (0.4 * home_team_data['Home Score'].mean()), 2
-        )
+            (0.6 * away_team_data['Away Score'].mean()) + (0.4 * home_team_data['Away Score'].mean()), 2)
 
         # Display Predictions & Match History
         st.markdown(df_to_html_table(pd.DataFrame({"Home Team": [home_team], "Away Team": [away_team], "Predicted Home Goals": [predicted_home_goals_generic], "Predicted Away Goals": [predicted_away_goals_generic]}), "📋 Generic Prediction"), unsafe_allow_html=True)

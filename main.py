@@ -12,7 +12,7 @@ def main():
         """
     )
     # Sidebar for toggling between apps
-    app_options = ["League tables","Attendance analysis", "Team form analysis", "Goals prediction"]
+    app_options = ["League tables","Attendance analysis", "Team form analysis", "Goals prediction","Player Actions"]
     selected_app = st.sidebar.selectbox("Select an App", app_options)
 
     if selected_app == "League tables":
@@ -23,9 +23,9 @@ def main():
     elif selected_app == "Team form analysis":
         result_analysis()
 
-   # elif selected_app == "Player Analysis":
-     #   st.header("Player Analysis")
-     #   players_analysis()
+    elif selected_app == "Player Actions":
+        st.header("Player Analysis")
+        players_analysis()
     elif selected_app == "Goals prediction":
         goals_prediction()
 

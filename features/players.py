@@ -1,112 +1,118 @@
-import pandas as pd
 import streamlit as st
+import pandas as pd
 import plotly.express as px
-from utils import run_query, get_team_filters, get_player_stats
+from utils import run_query
 
 
-def apply_filters(players_df, filters):
-    # Apply active filters
-    for key, value in filters.items():
-        if value['enabled_min']:
-            players_df = players_df[players_df[key] >= value['min']]
-        if value['enabled_max']:
-            players_df = players_df[players_df[key] <= value['max']]
-    return players_df
+# Function to fetch available countries, leagues, and teams from `dim_teams`
+def get_team_filters():
+    query = """
+    SELECT DISTINCT COUNTRY_NAME, LEAGUE_NAME, TEAM_ID, TEAM_NAME
+    FROM dim_teams
+    """
+    df = run_query(query)
+    df.columns = df.columns.str.lower()
+    return df
 
 
-def visualize_good_performers(players_df):
+# Function to fetch player stats from `agg_player`
+def get_player_stats(selected_country, selected_league, selected_team):
+    query = f"""
+    SELECT 
+        PLAYER_NAME, TEAM_NAME, COUNTRY_NAME, LEAGUE_NAME, 
+        TOTAL_MINUTESPLAYED, TOTAL_GOALS, TOTAL_ASSISTS
+    FROM agg_player
+    WHERE COUNTRY_NAME = '{selected_country}'
+    AND LEAGUE_NAME = '{selected_league}'
+    {f"AND TEAM_NAME = '{selected_team}'" if selected_team else ""}
+    """
+
+    df = run_query(query)
+
+    # Ensure proper data types
+    df.columns = df.columns.str.lower()
+    df = df.fillna(0)
+    df["total_minutesplayed"] = pd.to_numeric(df["total_minutesplayed"], errors="coerce")
+    df["total_goals"] = pd.to_numeric(df["total_goals"], errors="coerce")
+    df["total_assists"] = pd.to_numeric(df["total_assists"], errors="coerce")
+
+    # Add a new column for goal contributions (goals + assists)
+    df["goal_contributions"] = df["total_goals"] + df["total_assists"]
+
+    # 🔥 **Filter out players with zero goal contributions**
+    df = df[df["goal_contributions"] > 0]
+
+    return df
+
+
+# Function to generate scatter plot
+def plot_minutes_vs_goal_contributions(players_df):
+    """Creates and displays a scatter plot of Minutes Played vs. Goal Contributions."""
     if players_df.empty:
-        st.warning("⚠️ No players meet the criteria.")
+        st.warning("⚠️ No player data available for the selected filters.")
         return
 
-    players_df["G90"] = pd.to_numeric(players_df["G90"], errors="coerce")
-    players_df["T_GOALS"] = pd.to_numeric(players_df["T_GOALS"], errors="coerce")
-    players_df["T_MINUTES_PLAYED"] = pd.to_numeric(players_df["T_MINUTES_PLAYED"], errors="coerce")
-    players_df["T_GAMES_PLAYED"] = pd.to_numeric(players_df["T_GAMES_PLAYED"], errors="coerce")
-    players_df = players_df.dropna(subset=["G90", "T_GOALS", "T_MINUTES_PLAYED", "T_GAMES_PLAYED"])
-
-    avg_goals = players_df["T_GOALS"].mean()
-    avg_g90 = players_df["G90"].mean()
-
+    # Scatter plot
     fig = px.scatter(
-        players_df, x="T_GOALS", y="G90",
-        size="T_MINUTES_PLAYED", color="TEAM_NAME",
-        hover_data={"PLAYER_NAME": True, "TEAM_NAME": True, "T_GAMES_PLAYED": True, "T_GOALS": True,
-                    "T_MINUTES_PLAYED": True},
-        title="Players Pivot",
-        labels={"T_GOALS": "Total Goals", "G90": "Goals per 90 Minutes", "TEAM_NAME": "Team"}
+        players_df,
+        x="total_minutesplayed",
+        y="goal_contributions",
+        size="goal_contributions",
+        color="team_name",
+        hover_data={"player_name": True, "team_name": True, "total_goals": True, "total_assists": True,
+                    "total_minutesplayed": True},
+        title="Minutes Played vs Goal Contributions",
+        labels={"total_minutesplayed": "Total Minutes Played",
+                "goal_contributions": "Goal Contributions (Goals + Assists)", "team_name": "Team"}
     )
 
-    fig.add_hline(y=avg_g90, line_dash="dash", line_color="gray", annotation_text="League Avg G90",
-                  annotation_position="bottom right")
-    fig.add_vline(x=avg_goals, line_dash="dash", line_color="gray", annotation_text="League Avg Goals",
-                  annotation_position="top left")
-
+    # Display plot
     st.plotly_chart(fig)
 
 
+# Streamlit UI for Player Data Analysis
 def players_analysis():
+    st.subheader("⚽ Player Performance Analysis")
 
-
+    # Fetch available teams and leagues
     team_filters = get_team_filters()
-    countries = team_filters['COUNTRY_NAME'].unique()
+
+    countries = team_filters['country_name'].unique()
+
+    # Country Selection
     selected_country = st.selectbox("🌍 Select Country", options=["Select"] + list(countries), index=0)
 
     leagues = []
     if selected_country != "Select":
-        leagues = team_filters[team_filters['COUNTRY_NAME'] == selected_country]['LEAGUE_NAME'].unique()
+        leagues = team_filters[team_filters['country_name'] == selected_country]['league_name'].unique()
 
     selected_league = st.selectbox("🏆 Select League", options=["Select"] + list(leagues), index=0)
 
-    if st.button("🔍 Load Player Data"):
-        players_df = get_player_stats(selected_country, selected_league)
+    teams = []
+    if selected_league != "Select":
+        teams = team_filters[
+            (team_filters['country_name'] == selected_country) & (team_filters['league_name'] == selected_league)][
+            'team_name'].unique()
+
+    selected_team = st.selectbox("🏟️ Select Team (Optional)", options=["All"] + list(teams), index=0)
+
+    # Button to load data
+    if st.button("📊 Load & Plot Data"):
+        if selected_country == "Select" or selected_league == "Select":
+            st.error("❌ Please select both a Country and League.")
+            return
+
+        # Fetch player data
+        players_df = get_player_stats(selected_country, selected_league,
+                                      selected_team if selected_team != "All" else "")
 
         if players_df.empty:
-            st.error("⚠️ No player data found! Please check your selection or data source.")
+            st.error("⚠️ No player data found for the selected filters.")
         else:
-            st.session_state["players_df"] = players_df
-            st.success("✅ Player data loaded successfully!")
+            st.success("✅ Data loaded successfully! Generating visualization...")
+            plot_minutes_vs_goal_contributions(players_df)
 
-    if "players_df" in st.session_state:
-        players_df = st.session_state["players_df"]
-    else:
-        st.warning("⚠️ Please load player data first.")
-        return
 
-    st.sidebar.subheader("⚙️ Set Your Filters")
-
-    filters = {
-        "T_GAMES_PLAYED": {"label": "Games Played", "min": 10, "max": 50, "enabled_min": False, "enabled_max": False},
-        "T_GOALS": {"label": "Total Goals", "min": 0, "max": 50, "enabled_min": False, "enabled_max": False},
-        "GPG": {"label": "Goals Per Game", "min": 0.5, "max": 2.0, "enabled_min": False, "enabled_max": False},
-        "G90": {"label": "Goals Per 90 Minutes", "min": 0.5, "max": 2.0, "enabled_min": False, "enabled_max": False}
-    }
-
-    for key, filter_data in filters.items():
-        st.sidebar.markdown(f"**{filter_data['label']}**")
-        filters[key]["enabled_min"] = st.sidebar.checkbox(f"Min {filter_data['label']}",
-                                                          value=filter_data["enabled_min"])
-        if filters[key]["enabled_min"]:
-            filters[key]["min"] = st.sidebar.number_input(f"Min {filter_data['label']}", value=filter_data["min"],
-                                                          format="%.2f" if isinstance(filter_data["min"],
-                                                                                      float) else "%d")
-        filters[key]["enabled_max"] = st.sidebar.checkbox(f"Max {filter_data['label']}",
-                                                          value=filter_data["enabled_max"])
-        if filters[key]["enabled_max"]:
-            filters[key]["max"] = st.sidebar.number_input(f"Max {filter_data['label']}", value=filter_data["max"],
-                                                          format="%.2f" if isinstance(filter_data["max"],
-                                                                                      float) else "%d")
-
-    if st.sidebar.button("Apply Filters"):
-        active_filters = {k: v for k, v in filters.items() if v["enabled_min"] or v["enabled_max"]}
-        filtered_players = apply_filters(players_df, active_filters)
-        st.session_state["filtered_players"] = filtered_players
-
-    if st.sidebar.button("Reset Filters"):
-        if "filtered_players" in st.session_state:
-            del st.session_state["filtered_players"]
-
-    filtered_players = st.session_state.get("filtered_players", players_df)
-    visualize_good_performers(filtered_players)
-    csv = filtered_players.to_csv(index=False).encode('utf-8')
-    st.sidebar.download_button(label="📥 Download Player Data", data=csv, file_name="players.csv", mime="text/csv")
+# Run Streamlit App
+if __name__ == "__main__":
+    players_analysis()
